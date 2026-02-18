@@ -190,6 +190,7 @@ export const CitationSidebar = ({
       case 'pubmed': return { bg: 'bg-blue-100', text: 'text-blue-700', label: 'PubMed' };
       case 'clinicaltrials': return { bg: 'bg-green-100', text: 'text-green-700', label: 'Clinical Trial' };
       case 'patent': return { bg: 'bg-purple-100', text: 'text-purple-700', label: 'Patent' };
+      case 'regulatory': return { bg: 'bg-red-100', text: 'text-red-700', label: 'Regulatory' };
       case 'market_report': return { bg: 'bg-orange-100', text: 'text-orange-700', label: 'Market Report' };
       default: return { bg: 'bg-gray-100', text: 'text-gray-700', label: 'Source' };
     }
@@ -333,16 +334,48 @@ const CitationPanel = ({
   // Aggregate citations from all agent results
   const getAllCitations = () => {
     const citations = [];
-    
-    // Add mock citations based on agent results
-    if (agentResults?.clinical) {
-      citations.push(...MOCK_CITATIONS.clinical);
-    }
-    if (agentResults?.patent) {
-      citations.push(...MOCK_CITATIONS.patent);
-    }
-    if (agentResults?.market) {
-      citations.push(...MOCK_CITATIONS.market);
+
+    if (!agentResults) return citations;
+
+    Object.entries(agentResults).forEach(([agentKey, payload]) => {
+      if (!payload || typeof payload !== 'object') return;
+      if (!Array.isArray(payload.evidence)) return;
+
+      payload.evidence.forEach((ev) => {
+        const sourceName = ev?.source?.name || 'Source';
+        const sourceLower = sourceName.toLowerCase();
+        const citationType = sourceLower.includes('pubmed')
+          ? 'pubmed'
+          : sourceLower.includes('clinicaltrials')
+            ? 'clinicaltrials'
+            : sourceLower.includes('fda')
+              ? 'regulatory'
+              : 'other';
+
+        const publishedYear = ev?.source?.published_at
+          ? new Date(ev.source.published_at).getFullYear()
+          : null;
+
+        citations.push({
+          id: ev?.claim_id || ev?.source?.document_id || `${agentKey}-${citations.length}`,
+          type: citationType,
+          title: ev?.claim_text || 'Evidence record',
+          source: sourceName,
+          year: Number.isFinite(publishedYear) ? publishedYear : undefined,
+          url: ev?.source?.url,
+          relevance: ev?.quality?.confidence || 0,
+          verification_status: ev?.quality?.verification_status || 'unverified',
+          excerpt: ev?.retrieval?.snippet,
+          fetched_at: ev?.retrieval?.fetched_at,
+          source_agent: agentKey
+        });
+      });
+    });
+
+    if (citations.length === 0) {
+      if (agentResults?.clinical) citations.push(...MOCK_CITATIONS.clinical);
+      if (agentResults?.patent) citations.push(...MOCK_CITATIONS.patent);
+      if (agentResults?.market) citations.push(...MOCK_CITATIONS.market);
     }
 
     return citations;
@@ -371,6 +404,7 @@ const CitationPanel = ({
           { id: 'all', label: 'All Sources' },
           { id: 'pubmed', label: 'PubMed' },
           { id: 'clinicaltrials', label: 'Clinical Trials' },
+          { id: 'regulatory', label: 'Regulatory' },
           { id: 'patent', label: 'Patents' },
           { id: 'market_report', label: 'Market Reports' },
         ].map(cat => (
@@ -408,6 +442,7 @@ const CitationPanel = ({
                     <span className={`px-2 py-0.5 rounded text-xs font-medium ${
                       citation.type === 'pubmed' ? 'bg-blue-100 text-blue-700' :
                       citation.type === 'clinicaltrials' ? 'bg-green-100 text-green-700' :
+                      citation.type === 'regulatory' ? 'bg-red-100 text-red-700' :
                       citation.type === 'patent' ? 'bg-purple-100 text-purple-700' :
                       'bg-gray-100 text-gray-700'
                     }`}>
@@ -421,6 +456,11 @@ const CitationPanel = ({
                   <div className="text-xs text-gray-500 mt-1">
                     {citation.authors || citation.sponsor || citation.assignee || citation.source}
                   </div>
+                  {citation.fetched_at && (
+                    <div className="text-[11px] text-gray-400 mt-1">
+                      Updated: {new Date(citation.fetched_at).toLocaleString()}
+                    </div>
+                  )}
                 </div>
                 <ExternalLink className="w-4 h-4 text-gray-400 group-hover:text-blue-600 flex-shrink-0 mt-1" />
               </div>
@@ -440,6 +480,22 @@ const CitationPanel = ({
                   </span>
                 </div>
               )}
+
+              {citation.verification_status && (
+                <div className="mt-2">
+                  <span className={`text-[10px] px-2 py-0.5 rounded border ${
+                    citation.verification_status === 'verified'
+                      ? 'bg-green-100 text-green-700 border-green-200'
+                      : citation.verification_status === 'partially_verified'
+                        ? 'bg-yellow-100 text-yellow-700 border-yellow-200'
+                        : citation.verification_status === 'conflicting'
+                          ? 'bg-red-100 text-red-700 border-red-200'
+                          : 'bg-gray-100 text-gray-700 border-gray-200'
+                  }`}>
+                    {citation.verification_status.replace('_', ' ')}
+                  </span>
+                </div>
+              )}
             </button>
           ))
         )}
@@ -451,7 +507,7 @@ const CitationPanel = ({
           <span>{citations.length} sources referenced</span>
           <span className="flex items-center">
             <CheckCircle2 className="w-3 h-3 text-green-500 mr-1" />
-            All sources verified
+            {citations.filter(c => c.verification_status === 'verified').length} verified
           </span>
         </div>
       </div>

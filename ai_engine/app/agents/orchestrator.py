@@ -350,75 +350,60 @@ class MasterOrchestrator:
         """
         summary = {
             "molecule": molecule,
-            "overall_assessment": "FAVORABLE",
+            "overall_assessment": "CAUTIOUS",
             "key_findings": [],
             "risks": [],
             "opportunities": [],
-            "recommended_actions": []
+            "recommended_actions": [],
+            "supported_claim_ids": [],
+            "unsupported_sections": [],
         }
-        
-        # Extract clinical findings
-        if "clinical" in results and "error" not in results["clinical"]:
-            clinical = results["clinical"]
-            summary["key_findings"].append(
-                f"Found {clinical.get('total_trials_found', 0)} clinical trials with safety score {clinical.get('safety_score', 'N/A')}/10"
-            )
-            if clinical.get("potential_new_indications"):
-                summary["opportunities"].extend([
-                    f"Potential new indication: {ind}" 
-                    for ind in clinical["potential_new_indications"][:2]
-                ])
-        
-        # Extract patent findings
-        if "patent" in results and "error" not in results["patent"]:
-            patent = results["patent"]
-            summary["key_findings"].append(
-                f"Patent expiration: {patent.get('earliest_expiration', 'Unknown')} | FTO Status: {patent.get('freedom_to_operate', 'Unknown')}"
-            )
-            if patent.get("blocking_patents", 0) > 0:
-                summary["risks"].append(
-                    f"{patent['blocking_patents']} blocking patents identified"
-                )
-        
-        # Extract IQVIA market findings
-        if "iqvia" in results and "error" not in results["iqvia"]:
-            iqvia = results["iqvia"]
-            summary["key_findings"].append(
-                f"Market Size: ${iqvia.get('global_market_size_usd_bn', 0)}B | CAGR: {iqvia.get('cagr_percent', 0)}%"
-            )
-        
-        # Extract regulatory findings
-        if "regulatory" in results and "error" not in results["regulatory"]:
-            regulatory = results["regulatory"]
-            summary["key_findings"].append(
-                f"Regulatory Risk: {regulatory.get('risk_level', 'Unknown')} | FDA Approval: {regulatory.get('fda_approval_probability', 0)*100}%"
-            )
-            if regulatory.get("risk_score", 0) > 7.0:
-                summary["risks"].append(f"High regulatory risk score: {regulatory['risk_score']}/10")
-        
-        # Extract patient sentiment findings
-        if "patient_sentiment" in results and "error" not in results["patient_sentiment"]:
-            sentiment = results["patient_sentiment"]
-            summary["key_findings"].append(
-                f"Patient Satisfaction: {sentiment.get('treatment_satisfaction_score', 0)}% | Sentiment: {sentiment.get('sentiment_classification', 'Unknown')}"
-            )
-            if sentiment.get("unmet_needs_identified"):
-                summary["opportunities"].extend([
-                    f"Unmet need: {need['need']}"
-                    for need in sentiment["unmet_needs_identified"][:2]
-                ])
-        
-        # Extract validation concerns
-        if "validation" in results and "error" not in results["validation"]:
+
+        grounded_findings = 0
+
+        for agent_name, payload in results.items():
+            if not isinstance(payload, dict) or "error" in payload:
+                continue
+
+            claims = payload.get("claims") or []
+            verification_summary = payload.get("verification_summary") or {}
+            is_abstained = bool(payload.get("abstained"))
+
+            if claims and not is_abstained:
+                verified_like = [
+                    claim for claim in claims
+                    if claim.get("verification_status") in {"verified", "partially_verified"}
+                ]
+                if verified_like:
+                    grounded_findings += len(verified_like)
+                    for claim in verified_like[:3]:
+                        summary["key_findings"].append(claim.get("claim_text"))
+                        if claim.get("claim_id"):
+                            summary["supported_claim_ids"].append(claim["claim_id"])
+                else:
+                    summary["unsupported_sections"].append(agent_name)
+                    summary["risks"].append(f"{agent_name}: no verified claims available")
+
+                if verification_summary.get("conflicting_count", 0) > 0:
+                    summary["risks"].append(f"{agent_name}: conflicting evidence detected")
+                continue
+
+            summary["unsupported_sections"].append(agent_name)
+
+        if grounded_findings > 0:
+            summary["overall_assessment"] = "EVIDENCE_BACKED"
+            summary["recommended_actions"].append("Review linked evidence and source timestamps before decisions")
+        else:
+            summary["overall_assessment"] = "INSUFFICIENT_VERIFIED_EVIDENCE"
+            summary["risks"].append("Insufficient verified evidence for factual summary")
+            summary["recommended_actions"].append("Refresh query or broaden trusted sources")
+
+        if "validation" in results and isinstance(results["validation"], dict) and "error" not in results["validation"]:
             validation = results["validation"]
             summary["risks"].extend(validation.get("risk_flags", [])[:3])
-            
-            # Adjust overall assessment based on validation
-            if validation.get("overall_confidence", "HIGH") == "LOW":
-                summary["overall_assessment"] = "CAUTIOUS"
-            elif validation.get("critical_issues", []):
+            if validation.get("critical_issues", []):
                 summary["overall_assessment"] = "REVIEW_REQUIRED"
-        
+
         return summary
     
     def get_agent_status(self) -> Dict[str, Any]:

@@ -721,7 +721,7 @@ async def gather_web_intelligence(request: WebIntelRequest):
     )
     
     try:
-        web_agent: WebIntelligenceAgent = app.state.web_agent
+        web_agent: WebIntelligenceAgent = app.state.web_intel_agent
         privacy_manager: PrivacyManager = app.state.privacy_manager
         llm_config = privacy_manager.get_llm_config("auto")
         

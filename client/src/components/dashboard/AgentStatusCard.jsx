@@ -13,6 +13,7 @@ const AgentStatusCard = ({
   name,
   status,
   icon: Icon,
+  verificationStatus = null,
   delay = 0,
   onClick,
   isSelected = false,
@@ -71,6 +72,20 @@ const AgentStatusCard = ({
   const cfg = statusConfig[status] || statusConfig.idle;
   const { StatusIcon } = cfg;
   const isClickable = status === 'completed' && hasResults;
+
+  const verificationStyles = {
+    verified: 'bg-green-100 text-green-700 border-green-200',
+    partially_verified: 'bg-yellow-100 text-yellow-700 border-yellow-200',
+    unverified: 'bg-gray-100 text-gray-700 border-gray-200',
+    conflicting: 'bg-red-100 text-red-700 border-red-200'
+  };
+
+  const verificationLabels = {
+    verified: 'Verified',
+    partially_verified: 'Partial',
+    unverified: 'Unverified',
+    conflicting: 'Conflict'
+  };
 
   // mouse move handler for subtle 3D tilt (small and safe)
   const handleMouseMove = (e) => {
@@ -143,6 +158,12 @@ const AgentStatusCard = ({
           <StatusIcon className={`w-3.5 h-3.5 ${cfg.animate ? 'animate-spin' : ''}`} />
           <span>{cfg.label}</span>
         </div>
+
+        {verificationStatus && (
+          <div className={`text-[10px] px-2 py-0.5 rounded border ${verificationStyles[verificationStatus] || verificationStyles.unverified}`}>
+            {verificationLabels[verificationStatus] || 'Unverified'}
+          </div>
+        )}
 
         {/* view details button - animated slide-in on hover */}
         {isClickable && (

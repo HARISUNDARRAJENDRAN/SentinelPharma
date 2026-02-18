@@ -179,6 +179,21 @@ const ResearchDashboard = () => {
     setAgentStatuses(prev => prev.map(agent => ({ ...agent, status: 'idle' })));
   };
 
+  const getAgentVerificationStatus = (agentName) => {
+    const data = getAgentData(agentName);
+    if (!data) return null;
+
+    if (data.abstained) return 'unverified';
+
+    const verification = data.verification_summary;
+    if (!verification) return null;
+
+    if ((verification.conflicting_count || 0) > 0) return 'conflicting';
+    if ((verification.verified_count || 0) > 0) return 'verified';
+    if ((verification.partial_count || 0) > 0) return 'partially_verified';
+    return 'unverified';
+  };
+
   return (
     <div className="max-w-7xl mx-auto space-y-8">
       {/* Header */}
@@ -301,6 +316,7 @@ const ResearchDashboard = () => {
                 name={agent.name}
                 status={agent.status}
                 icon={agent.icon}
+                verificationStatus={getAgentVerificationStatus(agent.name)}
                 delay={index * 80}
                 onClick={() => handleAgentClick(agent)}
                 isSelected={selectedAgent === agent.name}

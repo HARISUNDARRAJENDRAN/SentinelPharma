@@ -54,6 +54,17 @@ const ComprehensiveSummary = ({ agentResults, molecule }) => {
       validation
     } = agentResults;
 
+    const verificationTotals = Object.values(agentResults || {}).reduce((acc, payload) => {
+      if (!payload || typeof payload !== 'object' || !payload.verification_summary) return acc;
+      const summary = payload.verification_summary;
+      acc.verified += summary.verified_count || 0;
+      acc.partial += summary.partial_count || 0;
+      acc.unverified += summary.unverified_count || 0;
+      acc.conflicting += summary.conflicting_count || 0;
+      if (payload.abstained) acc.abstained += 1;
+      return acc;
+    }, { verified: 0, partial: 0, unverified: 0, conflicting: 0, abstained: 0 });
+
     // Market & Financial
     const marketSize = iqvia?.global_market_size_usd_bn || iqvia?.market_size?.total_market_usd_bn || 4.2;
     const cagr = parseFloat((iqvia?.five_year_cagr || '8.5').replace('%', ''));
@@ -111,6 +122,7 @@ const ComprehensiveSummary = ({ agentResults, molecule }) => {
       supplyRisk,
       confidenceScore,
       riskFlags,
+      verificationTotals,
       // Agent summaries
       agentScores: {
         iqvia: 85,
@@ -361,6 +373,17 @@ const ComprehensiveSummary = ({ agentResults, molecule }) => {
             <div className="text-2xl font-bold text-gray-900 dark:text-white">{aggregatedData.confidenceScore}%</div>
             <div className="text-xs text-gray-600 dark:text-gray-400">Confidence</div>
           </div>
+        </div>
+      </div>
+
+      <div className="bg-white dark:bg-slate-800 rounded-xl border border-gray-200 dark:border-slate-700 p-4">
+        <h4 className="text-sm font-semibold text-gray-900 dark:text-white mb-3">Truth Verification Overview</h4>
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-sm">
+          <div className="px-2 py-1 rounded bg-green-50 text-green-700">Verified: {aggregatedData.verificationTotals.verified}</div>
+          <div className="px-2 py-1 rounded bg-yellow-50 text-yellow-700">Partial: {aggregatedData.verificationTotals.partial}</div>
+          <div className="px-2 py-1 rounded bg-gray-100 text-gray-700">Unverified: {aggregatedData.verificationTotals.unverified}</div>
+          <div className="px-2 py-1 rounded bg-red-50 text-red-700">Conflicts: {aggregatedData.verificationTotals.conflicting}</div>
+          <div className="px-2 py-1 rounded bg-slate-100 text-slate-700">Abstained agents: {aggregatedData.verificationTotals.abstained}</div>
         </div>
       </div>
 

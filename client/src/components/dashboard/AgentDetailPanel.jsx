@@ -1538,6 +1538,87 @@ const AgentDetailPanel = ({ agent, data, onClose, molecule }) => {
     ];
   };
 
+  const getVerificationChip = (status) => {
+    if (status === 'verified') return 'bg-green-100 text-green-700 border-green-200';
+    if (status === 'partially_verified') return 'bg-yellow-100 text-yellow-700 border-yellow-200';
+    if (status === 'conflicting') return 'bg-red-100 text-red-700 border-red-200';
+    return 'bg-gray-100 text-gray-700 border-gray-200';
+  };
+
+  const renderTruthSection = () => {
+    const verification = agentData.verification_summary;
+    const freshness = agentData.freshness_summary;
+    const evidence = Array.isArray(agentData.evidence) ? agentData.evidence : [];
+
+    if (!verification && evidence.length === 0 && !agentData.abstained) return null;
+
+    return (
+      <div className="mb-5 bg-white rounded-xl border border-gray-200 p-4">
+        <div className="flex flex-wrap items-center gap-2 mb-3">
+          <h5 className="text-sm font-semibold text-gray-900">Truth Verification</h5>
+          {agentData.abstained && (
+            <span className="text-[11px] px-2 py-0.5 rounded border bg-gray-100 text-gray-700 border-gray-200">
+              Abstained
+            </span>
+          )}
+          {!agentData.abstained && verification && (
+            <>
+              {(verification.verified_count || 0) > 0 && (
+                <span className={`text-[11px] px-2 py-0.5 rounded border ${getVerificationChip('verified')}`}>
+                  Verified: {verification.verified_count}
+                </span>
+              )}
+              {(verification.partial_count || 0) > 0 && (
+                <span className={`text-[11px] px-2 py-0.5 rounded border ${getVerificationChip('partially_verified')}`}>
+                  Partial: {verification.partial_count}
+                </span>
+              )}
+              {(verification.unverified_count || 0) > 0 && (
+                <span className={`text-[11px] px-2 py-0.5 rounded border ${getVerificationChip('unverified')}`}>
+                  Unverified: {verification.unverified_count}
+                </span>
+              )}
+              {(verification.conflicting_count || 0) > 0 && (
+                <span className={`text-[11px] px-2 py-0.5 rounded border ${getVerificationChip('conflicting')}`}>
+                  Conflicts: {verification.conflicting_count}
+                </span>
+              )}
+            </>
+          )}
+        </div>
+
+        {freshness?.latest_fetch_at && (
+          <p className="text-xs text-gray-500 mb-3">
+            Last updated: {new Date(freshness.latest_fetch_at).toLocaleString()} • Max age: {freshness.max_age_hours ?? 'N/A'}h
+          </p>
+        )}
+
+        {agentData.abstain_reason && (
+          <p className="text-xs text-gray-600 mb-3">{agentData.abstain_reason}</p>
+        )}
+
+        {evidence.length > 0 && (
+          <div className="space-y-2 max-h-44 overflow-y-auto">
+            {evidence.slice(0, 6).map((item, idx) => (
+              <a
+                key={item.claim_id || idx}
+                href={item?.source?.url || '#'}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="block p-2 rounded border border-gray-200 hover:border-gray-300 transition-colors"
+              >
+                <div className="text-xs font-medium text-gray-800 line-clamp-2">{item?.claim_text || 'Evidence record'}</div>
+                <div className="text-[11px] text-gray-500 mt-1">
+                  {item?.source?.name || 'Source'} • {item?.quality?.verification_status || 'unverified'}
+                </div>
+              </a>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   // ===== RENDER AS MODAL POPUP =====
   return (
     <>
@@ -1618,6 +1699,7 @@ const AgentDetailPanel = ({ agent, data, onClose, molecule }) => {
 
             {/* Detailed Content */}
             <div className="p-6">
+              {renderTruthSection()}
               <div className="flex items-center space-x-2 mb-4">
                 <Eye className="w-5 h-5 text-gray-500" />
                 <h4 className="text-lg font-semibold text-gray-900">Detailed Analysis</h4>

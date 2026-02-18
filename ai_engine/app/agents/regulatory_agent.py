@@ -10,10 +10,9 @@ Provides:
 - Timeline estimation
 """
 
-import random
-import asyncio
 from datetime import datetime, timedelta
 from typing import Dict, Any, List
+from datetime import timezone
 
 import structlog
 from ..services.llm_service import get_llm_service
@@ -24,6 +23,10 @@ from ..utils.drug_data_generator import (
     get_drug_choice,
     DrugDataGenerator
 )
+from ..core.evidence_schema import EvidenceRecord, EvidenceSource, EvidenceRetrieval, EvidenceQuality
+from ..services.evidence_validator import EvidenceValidator
+from ..services.grounded_summarizer import GroundedSummarizer
+from ..services.source_connectors import FDAConnector, ClinicalTrialsConnector
 
 logger = structlog.get_logger(__name__)
 
@@ -43,6 +46,10 @@ class RegulatoryAgent:
         self.name = "RegulatoryAgent"
         self.version = "1.0.0"
         self.llm_service = get_llm_service()
+        self.evidence_validator = EvidenceValidator()
+        self.grounded_summarizer = GroundedSummarizer()
+        self.fda = FDAConnector()
+        self.clinical_trials = ClinicalTrialsConnector()
         
         # Regulatory pathways
         self.pathways = [
@@ -85,78 +92,80 @@ class RegulatoryAgent:
             model=llm_config.get("model"),
             provider=llm_config.get("provider")
         )
-        
-        # Simulate processing
-        await asyncio.sleep(random.uniform(0.7, 1.8))
-        
-        # Generate drug-specific regulatory data
+
+        # Gather real-time regulatory evidence from official sources
+        fda_rows, ct_rows = await __import__("asyncio").gather(
+            self.fda.search_labels(molecule=molecule, limit=5),
+            self.clinical_trials.search(query=f"{molecule} regulatory approval", limit=5),
+            return_exceptions=True,
+        )
+
+        raw_rows: List[Dict[str, Any]] = []
+        for batch in [fda_rows, ct_rows]:
+            if isinstance(batch, Exception):
+                logger.warning("regulatory_connector_failed", agent=self.name, error=str(batch))
+                continue
+            raw_rows.extend(batch)
+
+        evidence = self._rows_to_evidence(raw_rows)
+        evidence = self.evidence_validator.detect_and_mark_conflicts(evidence)
+        verification_summary = self.evidence_validator.summarize_verification(evidence)
+        freshness_summary = self.evidence_validator.summarize_freshness(evidence)
+        abstained, abstain_reason = self.evidence_validator.should_abstain(evidence)
+
+        # Generate deterministic regulatory metrics
         seed = get_drug_seed(molecule)
-        
-        # Regulatory pathway
+
         pathway = get_drug_choice(molecule, self.pathways)
-        
-        # Approval risk score (1-10, lower is better)
-        risk_score = round(get_drug_specific_value(molecule, 2.0, 8.5), 1)
-        
-        # Timeline estimation
-        estimated_timeline_months = int(get_drug_specific_value(molecule, 18, 48))
-        
-        # FDA approval probability
-        approval_probability = round(get_drug_specific_value(molecule, 0.45, 0.85), 2)
-        
-        # Required studies
-        num_studies = 2 + (seed % 4)  # 2-5 studies
-        
-        # Generate risk factors
+
+        official_count = len([ev for ev in evidence if ev.quality.source_tier == "official"])
+        verified_like = verification_summary.verified_count + verification_summary.partial_count
+
+        base_risk = 7.8 - min(official_count * 0.4, 2.0) - min(verified_like * 0.25, 1.5)
+        risk_score = round(max(2.0, min(base_risk, 8.8)), 1)
+
+        estimated_timeline_months = max(12, 30 - min(official_count * 2, 10))
+        approval_probability = round(min(0.92, max(0.35, 0.45 + (verified_like * 0.05))), 2)
+
+        num_studies = 2 + (seed % 4)
         risk_factors = self._generate_risk_factors(molecule, risk_score)
-        
-        # Generate mitigation strategies
         mitigation = self._generate_mitigation_strategies(pathway, risk_factors)
-        
-        # Try to get LLM-enhanced regulatory assessment
+
+        claims = [
+            {
+                "claim_id": item.claim_id,
+                "claim_text": item.claim_text,
+                "verification_status": item.quality.verification_status,
+                "support_count": 1,
+            }
+            for item in evidence
+        ]
+
         llm_assessment = None
-        try:
-            if llm_config.get("provider") in ["gemini", "ollama", "local"]:
-                prompt = f"""Analyze the regulatory approval pathway for {molecule}:
-
-Pathway: {pathway}
-Risk Score: {risk_score}/10
-Approval Probability: {approval_probability * 100}%
-Timeline: {estimated_timeline_months} months
-
-Provide a concise regulatory strategy recommendation focusing on:
-1. Key regulatory hurdles
-2. Recommended submission strategy
-3. Risk mitigation priorities
-
-Keep response under 150 words."""
-                
-                llm_assessment = await self.llm_service.generate_completion(
-                    prompt=prompt,
-                    llm_config=llm_config,
-                    system_prompt="You are an expert regulatory affairs consultant with FDA/EMA experience.",
-                    temperature=0.6,
-                    max_tokens=800
-                )
-                logger.info(
-                    "llm_regulatory_assessment_completed",
-                    agent=self.name,
-                    provider=llm_config.get("provider")
-                )
-        except Exception as e:
-            logger.warning(
-                "llm_enhancement_failed",
-                agent=self.name,
-                error=str(e),
-                fallback="deterministic"
-            )
+        if abstained:
+            llm_assessment = "Insufficient verified regulatory evidence available right now."
+        else:
+            llm_assessment = await self.grounded_summarizer.summarize(evidence, llm_config)
         
         # Submission date estimation
         estimated_submission = datetime.now() + timedelta(days=int(estimated_timeline_months * 30))
+
+        compliance_score = max(55, min(98, 62 + verified_like * 4 + official_count * 3))
+        compliance_grade = "A" if compliance_score >= 90 else "A-" if compliance_score >= 85 else "B" if compliance_score >= 75 else "C"
+        warning_count = max(0, 3 - min(official_count, 3))
+        approval_timeline = f"{max(12, estimated_timeline_months - 6)}-{estimated_timeline_months} months"
         
         result = {
             "molecule": molecule,
-            "analysis_date": datetime.now().isoformat(),
+            "analysis_date": datetime.now(timezone.utc).isoformat(),
+
+            # Grounding contract
+            "claims": claims,
+            "evidence": [item.model_dump(mode="json") for item in evidence],
+            "verification_summary": verification_summary.model_dump(),
+            "freshness_summary": freshness_summary.model_dump(mode="json"),
+            "abstained": abstained,
+            "abstain_reason": abstain_reason,
             
             # Regulatory Pathway
             "recommended_pathway": pathway,
@@ -166,11 +175,21 @@ Keep response under 150 words."""
             "overall_risk_score": risk_score,
             "risk_level": self._categorize_risk(risk_score),
             "risk_factors": risk_factors,
+            "risk_score": risk_score,
             
             # Approval Metrics
             "fda_approval_probability": approval_probability,
             "estimated_timeline_months": estimated_timeline_months,
             "estimated_submission_date": estimated_submission.strftime("%Y-%m-%d"),
+
+            # UI-facing compatibility fields
+            "compliance_score": compliance_score,
+            "compliance_grade": compliance_grade,
+            "warning_count": warning_count,
+            "fda_status": "Evidence-backed" if not abstained else "Insufficient verified evidence",
+            "ema_status": "Aligned" if official_count > 0 else "Unknown",
+            "safety_monitoring": "Enhanced" if risk_score > 6.5 else "Standard",
+            "approval_timeline": approval_timeline,
             
             # Requirements
             "required_studies": self._generate_required_studies(num_studies),
@@ -193,7 +212,10 @@ Keep response under 150 words."""
             
             # LLM Enhancement
             "llm_assessment": llm_assessment,
-            "llm_provider": llm_config.get("provider") if llm_assessment else None,
+            "llm_provider": llm_config.get("provider") if llm_assessment and not abstained else None,
+
+            # Data sources
+            "data_sources": ["openFDA", "ClinicalTrials.gov"],
             
             # Metadata
             "processing_time_ms": round((datetime.now() - start_time).total_seconds() * 1000, 2),
@@ -209,6 +231,42 @@ Keep response under 150 words."""
         )
         
         return result
+
+    def _rows_to_evidence(self, rows: List[Dict[str, Any]]) -> List[EvidenceRecord]:
+        evidence_records: List[EvidenceRecord] = []
+
+        for row in rows:
+            try:
+                fetched_at_raw = row.get("fetched_at")
+                published_at_raw = row.get("published_at")
+                fetched_at = datetime.fromisoformat(fetched_at_raw) if fetched_at_raw else datetime.now(timezone.utc)
+                published_at = datetime.fromisoformat(published_at_raw) if published_at_raw else None
+
+                record = EvidenceRecord(
+                    claim_id=row["claim_id"],
+                    claim_text=row["claim_text"],
+                    source=EvidenceSource(
+                        name=row.get("source_name", "Unknown"),
+                        url=row["url"],
+                        document_id=row.get("document_id"),
+                        published_at=published_at,
+                    ),
+                    retrieval=EvidenceRetrieval(
+                        fetched_at=fetched_at,
+                        query=row.get("query", ""),
+                        snippet=row.get("snippet", ""),
+                        hash=row.get("hash", ""),
+                    ),
+                    quality=EvidenceQuality(
+                        source_tier=row.get("source_tier", "other"),
+                    ),
+                )
+                record = self.evidence_validator.apply_quality_defaults(record)
+                evidence_records.append(record)
+            except Exception as exc:
+                logger.warning("regulatory_evidence_row_skipped", agent=self.name, error=str(exc))
+
+        return evidence_records
     
     def _generate_risk_factors(self, molecule: str, risk_score: float) -> List[Dict[str, Any]]:
         """Generate drug-specific risk factors."""

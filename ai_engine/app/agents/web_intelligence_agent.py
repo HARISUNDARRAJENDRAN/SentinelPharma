@@ -14,11 +14,16 @@ import random
 import asyncio
 from datetime import datetime, timedelta
 from typing import Dict, Any, List
+from datetime import timezone
 
 import structlog
 from ..services.llm_service import get_llm_service
 from ..services.prompt_templates import PromptTemplates
 from ..utils.drug_data_generator import DrugDataGenerator
+from ..core.evidence_schema import EvidenceRecord, EvidenceSource, EvidenceRetrieval, EvidenceQuality
+from ..services.evidence_validator import EvidenceValidator
+from ..services.grounded_summarizer import GroundedSummarizer
+from ..services.source_connectors import PubMedConnector, FDAConnector, ClinicalTrialsConnector
 
 logger = structlog.get_logger(__name__)
 
@@ -38,12 +43,15 @@ class WebIntelligenceAgent:
         self.name = "WebIntelligenceAgent"
         self.version = "1.0.0"
         self.llm_service = get_llm_service()
+        self.evidence_validator = EvidenceValidator()
+        self.grounded_summarizer = GroundedSummarizer()
+        self.pubmed = PubMedConnector()
+        self.fda = FDAConnector()
+        self.clinical_trials = ClinicalTrialsConnector()
         
-        # Mock data sources
+        # Grounded sources
         self.sources = [
-            "PubMed", "ClinicalTrials.gov", "FDA.gov", 
-            "EMA.europa.eu", "WHO", "Reuters Health",
-            "FiercePharma", "Endpoints News", "STAT News"
+            "PubMed", "ClinicalTrials.gov", "openFDA"
         ]
         
         logger.info(f"Initialized {self.name} v{self.version}")
@@ -67,108 +75,133 @@ class WebIntelligenceAgent:
             agent=self.name
         )
         
-        # Get drug-specific data
-        web_data = DrugDataGenerator.get_web_intelligence_data(molecule)
-        
-        # Simulate web crawling
-        await asyncio.sleep(random.uniform(0.8, 1.5))
-        
-        # Gather intelligence from multiple sources
-        pubmed_results = self._search_pubmed(molecule, web_data)
-        news_signals = self._monitor_news(molecule, web_data)
-        regulatory_updates = self._check_regulatory(molecule, web_data)
-        vision_insights = self._analyze_charts(molecule)
-        social_signals = self._monitor_social(molecule)
-        
-        # Try to get LLM-enhanced intelligence synthesis
-        llm_intelligence = None
-        try:
-            if llm_config.get("provider") in ["gemini", "ollama", "local"]:
-                prompt = f"""Synthesize web intelligence for {molecule}:
+        pubmed_rows, fda_rows, ct_rows = await asyncio.gather(
+            self.pubmed.search(query=molecule, limit=5),
+            self.fda.search_labels(molecule=molecule, limit=5),
+            self.clinical_trials.search(query=molecule, limit=5),
+            return_exceptions=True,
+        )
 
-Recent Publications: {len(pubmed_results['recent_papers'])} new papers
-News Signals: {len(news_signals['articles'])} industry articles
-Regulatory Status: {regulatory_updates['risk_level']}
-Social Sentiment: {social_signals.get('sentiment_score', 0.5)}
+        raw_rows: List[Dict[str, Any]] = []
+        for batch in [pubmed_rows, fda_rows, ct_rows]:
+            if isinstance(batch, Exception):
+                logger.warning("connector_failed", agent=self.name, error=str(batch))
+                continue
+            raw_rows.extend(batch)
 
-Provide concise intelligence summary covering:
-1. Key trends and developments
-2. Emerging opportunities or threats
-3. Actionable insights
+        evidence = self._rows_to_evidence(raw_rows)
+        evidence = self.evidence_validator.detect_and_mark_conflicts(evidence)
+        verification_summary = self.evidence_validator.summarize_verification(evidence)
+        freshness_summary = self.evidence_validator.summarize_freshness(evidence)
+        abstained, abstain_reason = self.evidence_validator.should_abstain(evidence)
 
-Keep response under 150 words."""
-                
-                llm_intelligence = await self.llm_service.generate_completion(
-                    prompt=prompt,
-                    llm_config=llm_config,
-                    system_prompt="You are an expert pharmaceutical intelligence analyst.",
-                    temperature=0.7,
-                    max_tokens=800
-                )
-                logger.info(
-                    "llm_intelligence_completed",
-                    agent=self.name,
-                    provider=llm_config.get("provider")
-                )
-        except Exception as e:
-            logger.warning(
-                "llm_enhancement_failed",
-                agent=self.name,
-                error=str(e),
-                fallback="deterministic"
-            )
-        
+        if abstained:
+            llm_intelligence = "Insufficient verified evidence available right now."
+        else:
+            llm_intelligence = await self.grounded_summarizer.summarize(evidence, llm_config)
+
+        claims = [
+            {
+                "claim_id": item.claim_id,
+                "claim_text": item.claim_text,
+                "verification_status": item.quality.verification_status,
+                "support_count": 1,
+            }
+            for item in evidence
+        ]
+
+        source_counts = {
+            "pubmed": len([row for row in raw_rows if row.get("source_name") == "PubMed"]),
+            "openfda": len([row for row in raw_rows if row.get("source_name") == "openFDA"]),
+            "clinicaltrials": len([row for row in raw_rows if row.get("source_name") == "ClinicalTrials.gov"]),
+        }
+
         result = {
             "molecule": molecule,
-            "analysis_date": datetime.now().isoformat(),
-            
-            # PubMed Research
-            "scientific_publications": pubmed_results,
-            "new_publications_30d": len(pubmed_results["recent_papers"]),
-            
-            # News & Industry Signals
-            "news_signals": news_signals,
-            "signal_strength": self._calculate_signal_strength(news_signals),
-            
-            # Regulatory Updates
-            "regulatory_updates": regulatory_updates,
-            "regulatory_risk_level": regulatory_updates["risk_level"],
-            
-            # Vision AI Insights (from paper charts/graphs)
-            "vision_ai_insights": vision_insights,
-            
-            # Social/Community Signals
-            "community_signals": social_signals,
-            
-            # Aggregated Intelligence Summary
-            "intelligence_summary": self._generate_summary(
-                pubmed_results, news_signals, regulatory_updates
-            ),
-            
-            # Alert Indicators
-            "alerts": self._generate_alerts(molecule, news_signals, regulatory_updates),
-            
-            # LLM Enhancement
+            "analysis_date": datetime.now(timezone.utc).isoformat(),
+            "claims": claims,
+            "evidence": [item.model_dump(mode="json") for item in evidence],
+            "verification_summary": verification_summary.model_dump(),
+            "freshness_summary": freshness_summary.model_dump(mode="json"),
+            "abstained": abstained,
+            "abstain_reason": abstain_reason,
+            "intelligence_summary": {
+                "overall_sentiment": "Evidence-based",
+                "key_developments": [
+                    f"PubMed records: {source_counts['pubmed']}",
+                    f"openFDA label records: {source_counts['openfda']}",
+                    f"ClinicalTrials.gov records: {source_counts['clinicaltrials']}",
+                ],
+                "watch_points": [
+                    "Review latest official regulatory label updates",
+                    "Track trial status changes in ClinicalTrials.gov",
+                    "Monitor newly indexed PubMed publications",
+                ],
+                "opportunity_score": round(min(9.5, max(1.0, verification_summary.verified_count + (verification_summary.partial_count * 0.5))), 1),
+                "last_updated": datetime.now(timezone.utc).isoformat(),
+            },
             "llm_intelligence": llm_intelligence,
-            "llm_provider": llm_config.get("provider") if llm_intelligence else None,
-            
-            # Data Sources Used
+            "llm_provider": llm_config.get("provider") if llm_intelligence and not abstained else None,
             "data_sources": self.sources,
-            
-            # Metadata
             "agent": self.name,
             "version": self.version,
             "model_used": llm_config.get("model"),
-            "processing_time_ms": round((datetime.now() - start_time).total_seconds() * 1000, 2)
+            "processing_time_ms": round((datetime.now() - start_time).total_seconds() * 1000, 2),
         }
         
         logger.info(
             "web_intelligence_completed",
             molecule=molecule,
-            signals_found=len(result["alerts"])
+            evidence_count=len(result["evidence"]),
+            abstained=result["abstained"]
         )
         
         return result
+
+    def _rows_to_evidence(self, rows: List[Dict[str, Any]]) -> List[EvidenceRecord]:
+        evidence_records: List[EvidenceRecord] = []
+
+        for row in rows:
+            try:
+                fetched_at_raw = row.get("fetched_at")
+                published_at_raw = row.get("published_at")
+
+                fetched_at = datetime.fromisoformat(fetched_at_raw) if fetched_at_raw else datetime.now(timezone.utc)
+                published_at = datetime.fromisoformat(published_at_raw) if published_at_raw else None
+
+                record = EvidenceRecord(
+                    claim_id=row["claim_id"],
+                    claim_text=row["claim_text"],
+                    source=EvidenceSource(
+                        name=row.get("source_name", "Unknown"),
+                        url=row["url"],
+                        document_id=row.get("document_id"),
+                        published_at=published_at,
+                    ),
+                    retrieval=EvidenceRetrieval(
+                        fetched_at=fetched_at,
+                        query=row.get("query", ""),
+                        snippet=row.get("snippet", ""),
+                        hash=row.get("hash", ""),
+                    ),
+                    quality=EvidenceQuality(
+                        source_tier=row.get("source_tier", "other"),
+                    ),
+                )
+                record = self.evidence_validator.apply_quality_defaults(record)
+                evidence_records.append(record)
+            except Exception as exc:
+                logger.warning("evidence_row_skipped", agent=self.name, error=str(exc))
+
+        return evidence_records
+
+    async def search_pubmed(self, query: str, limit: int = 10) -> Dict[str, Any]:
+        rows = await self.pubmed.search(query=query, limit=limit)
+        return {
+            "query": query,
+            "count": len(rows),
+            "records": rows,
+        }
     
     def _search_pubmed(self, molecule: str, web_data: Dict[str, Any]) -> Dict[str, Any]:
         """Search PubMed for recent publications."""
