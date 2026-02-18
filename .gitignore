@@ -40,6 +40,8 @@ Thumbs.db
 # Logs
 *.log
 logs/
+.logs/
+.sentinelpharma.pids
 
 # Coverage reports
 htmlcov/

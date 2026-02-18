@@ -87,6 +87,17 @@ npm run dev
 
 Open the frontend URL shown by Vite (typically `http://localhost:5173`).
 
+### One-command startup (Linux)
+
+From repo root:
+
+```bash
+chmod +x start.sh
+./start.sh
+```
+
+This launches AI Engine, Server, and Client in the background and writes logs to `.logs/`.
+
 ## Docker (AI Engine)
 
 The AI engine includes a Dockerfile:
